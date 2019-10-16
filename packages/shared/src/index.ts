@@ -1,5 +1,7 @@
 export * from './patchFlags'
-export { globalsWhitelist } from './globalsWhitelist'
+export * from './element'
+export { isGloballyWhitelisted } from './globalsWhitelist'
+export { makeMap } from './makeMap'
 
 export const EMPTY_OBJ: { readonly [key: string]: any } = __DEV__
   ? Object.freeze({})
@@ -7,6 +9,11 @@ export const EMPTY_OBJ: { readonly [key: string]: any } = __DEV__
 export const EMPTY_ARR: [] = []
 
 export const NOOP = () => {}
+
+/**
+ * Always return false.
+ */
+export const NO = () => false
 
 export const isOn = (key: string) => key[0] === 'o' && key[1] === 'n'
 
@@ -43,7 +50,7 @@ export const isPlainObject = (val: any): val is object =>
 
 const vnodeHooksRE = /^vnode/
 export const isReservedProp = (key: string): boolean =>
-  key === 'key' || key === 'ref' || vnodeHooksRE.test(key)
+  key === 'key' || key === 'ref' || key === '$once' || vnodeHooksRE.test(key)
 
 const camelizeRE = /-(\w)/g
 export const camelize = (str: string): string => {

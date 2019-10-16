@@ -2,16 +2,23 @@ import {
   RootNode,
   NodeTypes,
   TemplateChildNode,
+  SimpleExpressionNode,
   ElementTypes,
   ElementCodegenNode,
   PlainElementNode,
   ComponentNode,
-  TemplateNode
+  TemplateNode,
+  ElementNode
 } from '../ast'
 import { TransformContext } from '../transform'
 import { APPLY_DIRECTIVES } from '../runtimeHelpers'
-import { PatchFlags } from '@vue/shared'
-import { isSlotOutlet } from '../utils'
+import { PatchFlags, isString, isSymbol } from '@vue/shared'
+import { isSlotOutlet, findProp } from '../utils'
+
+function hasDynamicKey(node: ElementNode) {
+  const keyProp = findProp(node, 'key')
+  return keyProp && keyProp.type === NodeTypes.DIRECTIVE
+}
 
 export function hoistStatic(root: RootNode, context: TransformContext) {
   walk(
@@ -47,7 +54,11 @@ function walk(
       child.type === NodeTypes.ELEMENT &&
       child.tagType === ElementTypes.ELEMENT
     ) {
-      if (!doNotHoistNode && isStaticNode(child, resultCache)) {
+      if (
+        !doNotHoistNode &&
+        isStaticNode(child, resultCache) &&
+        !hasDynamicKey(child)
+      ) {
         // whole tree is static
         child.codegenNode = context.hoist(child.codegenNode!)
         continue
@@ -56,9 +67,10 @@ function walk(
         // hoisting.
         const flag = getPatchFlag(child)
         if (
-          !flag ||
-          flag === PatchFlags.NEED_PATCH ||
-          flag === PatchFlags.TEXT
+          (!flag ||
+            flag === PatchFlags.NEED_PATCH ||
+            flag === PatchFlags.TEXT) &&
+          !hasDynamicKey(child)
         ) {
           let codegenNode = child.codegenNode as ElementCodegenNode
           if (codegenNode.callee === APPLY_DIRECTIVES) {
@@ -96,7 +108,7 @@ function getPatchFlag(node: PlainElementNode): number | undefined {
 }
 
 function isStaticNode(
-  node: TemplateChildNode,
+  node: TemplateChildNode | SimpleExpressionNode,
   resultCache: Map<TemplateChildNode, boolean>
 ): boolean {
   switch (node.type) {
@@ -108,7 +120,7 @@ function isStaticNode(
         return resultCache.get(node) as boolean
       }
       const flag = getPatchFlag(node)
-      if (!flag) {
+      if (!flag || flag === PatchFlags.TEXT) {
         // element self is static. check its children.
         for (let i = 0; i < node.children.length; i++) {
           if (!isStaticNode(node.children[i], resultCache)) {
@@ -126,9 +138,17 @@ function isStaticNode(
       return true
     case NodeTypes.IF:
     case NodeTypes.FOR:
-    case NodeTypes.INTERPOLATION:
-    case NodeTypes.COMPOUND_EXPRESSION:
       return false
+    case NodeTypes.INTERPOLATION:
+      return isStaticNode(node.content, resultCache)
+    case NodeTypes.SIMPLE_EXPRESSION:
+      return node.isConstant
+    case NodeTypes.COMPOUND_EXPRESSION:
+      return node.children.every(child => {
+        return (
+          isString(child) || isSymbol(child) || isStaticNode(child, resultCache)
+        )
+      })
     default:
       if (__DEV__) {
         const exhaustiveCheck: never = node

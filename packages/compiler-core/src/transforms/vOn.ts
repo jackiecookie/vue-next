@@ -1,5 +1,6 @@
 import { DirectiveTransform } from '../transform'
 import {
+  DirectiveNode,
   createObjectProperty,
   createSimpleExpression,
   ExpressionNode,
@@ -10,16 +11,26 @@ import {
 import { capitalize } from '@vue/shared'
 import { createCompilerError, ErrorCodes } from '../errors'
 import { processExpression } from './transformExpression'
+import { isMemberExpression } from '../utils'
 
 const fnExpRE = /^([\w$_]+|\([^)]*?\))\s*=>|^function(?:\s+[\w$]+)?\s*\(/
-const simplePathRE = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\['[^']*?']|\["[^"]*?"]|\[\d+]|\[[A-Za-z_$][\w$]*])*$/
 
-// v-on without arg is handled directly in ./element.ts due to it affecting
-// codegen for the entire props object. This transform here is only for v-on
-// *with* args.
-export const transformOn: DirectiveTransform = (dir, node, context) => {
-  const { loc, modifiers } = dir
-  const arg = dir.arg!
+export interface VOnDirectiveNode extends DirectiveNode {
+  // v-on without arg is handled directly in ./element.ts due to it affecting
+  // codegen for the entire props object. This transform here is only for v-on
+  // *with* args.
+  arg: ExpressionNode
+  // exp is guaranteed to be a simple expression here because v-on w/ arg is
+  // skipped by transformExpression as a special case.
+  exp: SimpleExpressionNode | undefined
+}
+
+export const transformOn: DirectiveTransform = (
+  dir: VOnDirectiveNode,
+  node,
+  context
+) => {
+  const { loc, modifiers, arg } = dir
   if (!dir.exp && !modifiers.length) {
     context.onError(createCompilerError(ErrorCodes.X_V_ON_NO_EXPRESSION, loc))
   }
@@ -44,12 +55,10 @@ export const transformOn: DirectiveTransform = (dir, node, context) => {
   // other modifiers are handled in compiler-dom
 
   // handler processing
-  if (dir.exp) {
-    // exp is guaranteed to be a simple expression here because v-on w/ arg is
-    // skipped by transformExpression as a special case.
-    let exp: ExpressionNode = dir.exp as SimpleExpressionNode
+  let exp: ExpressionNode | undefined = dir.exp
+  if (exp) {
     const isInlineStatement = !(
-      simplePathRE.test(exp.content) || fnExpRE.test(exp.content)
+      isMemberExpression(exp.content) || fnExpRE.test(exp.content)
     )
     // process the expression since it's been skipped
     if (!__BROWSER__ && context.prefixIdentifiers) {
@@ -65,14 +74,15 @@ export const transformOn: DirectiveTransform = (dir, node, context) => {
         `)`
       ])
     }
-    dir.exp = exp
   }
 
   return {
-    props: createObjectProperty(
-      eventName,
-      dir.exp || createSimpleExpression(`() => {}`, false, loc)
-    ),
+    props: [
+      createObjectProperty(
+        eventName,
+        exp || createSimpleExpression(`() => {}`, false, loc)
+      )
+    ],
     needRuntime: false
   }
 }

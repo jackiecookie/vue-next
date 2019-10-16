@@ -29,6 +29,7 @@ export { getCurrentInstance } from './component'
 
 // For custom renderers
 export { createRenderer } from './createRenderer'
+export { warn } from './warning'
 export {
   handleError,
   callWithErrorHandling,
@@ -80,6 +81,10 @@ export {
   Directive,
   DirectiveBinding,
   DirectiveHook,
+  ObjectDirective,
+  FunctionDirective,
   DirectiveArguments
 } from './directives'
 export { SuspenseBoundary } from './suspense'
+
+export const version = __VERSION__

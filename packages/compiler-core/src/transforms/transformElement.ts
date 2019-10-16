@@ -15,7 +15,7 @@ import {
   createObjectExpression,
   Property
 } from '../ast'
-import { isArray, PatchFlags, PatchFlagNames } from '@vue/shared'
+import { PatchFlags, PatchFlagNames, isSymbol } from '@vue/shared'
 import { createCompilerError, ErrorCodes } from '../errors'
 import {
   CREATE_VNODE,
@@ -23,10 +23,15 @@ import {
   RESOLVE_DIRECTIVE,
   RESOLVE_COMPONENT,
   MERGE_PROPS,
-  TO_HANDLERS
+  TO_HANDLERS,
+  PORTAL
 } from '../runtimeHelpers'
 import { getInnerRange, isVSlot, toValidAssetId } from '../utils'
 import { buildSlots } from './vSlot'
+
+// some directive transforms (e.g. v-model) may return a symbol for runtime
+// import, which should be used instead of a resolveDirective call.
+const directiveImportMap = new WeakMap<DirectiveNode, symbol>()
 
 // generate a JavaScript AST for this element's codegen
 export const transformElement: NodeTransform = (node, context) => {
@@ -34,6 +39,7 @@ export const transformElement: NodeTransform = (node, context) => {
     if (
       node.tagType === ElementTypes.ELEMENT ||
       node.tagType === ElementTypes.COMPONENT ||
+      node.tagType === ElementTypes.PORTAL ||
       // <template> with v-if or v-for are ignored during traversal.
       // <template> without v-slot should be treated as a normal element.
       (node.tagType === ElementTypes.TEMPLATE && !node.props.some(isVSlot))
@@ -42,6 +48,7 @@ export const transformElement: NodeTransform = (node, context) => {
       // processed and merged.
       return () => {
         const isComponent = node.tagType === ElementTypes.COMPONENT
+        const isPortal = node.tagType === ElementTypes.PORTAL
         let hasProps = node.props.length > 0
         let patchFlag: number = 0
         let runtimeDirectives: DirectiveNode[] | undefined
@@ -53,7 +60,11 @@ export const transformElement: NodeTransform = (node, context) => {
         }
 
         const args: CallExpression['arguments'] = [
-          isComponent ? toValidAssetId(node.tag, `component`) : `"${node.tag}"`
+          isComponent
+            ? toValidAssetId(node.tag, `component`)
+            : isPortal
+              ? context.helper(PORTAL)
+              : `"${node.tag}"`
         ]
         // props
         if (hasProps) {
@@ -137,9 +148,7 @@ export const transformElement: NodeTransform = (node, context) => {
             [
               vnode,
               createArrayExpression(
-                runtimeDirectives.map(dir => {
-                  return createDirectiveArgs(dir, context)
-                }),
+                runtimeDirectives.map(dir => buildDirectiveArgs(dir, context)),
                 loc
               )
             ],
@@ -181,7 +190,12 @@ export function buildProps(
 
   const analyzePatchFlag = ({ key, value }: Property) => {
     if (key.type === NodeTypes.SIMPLE_EXPRESSION && key.isStatic) {
-      if (value.type !== NodeTypes.SIMPLE_EXPRESSION || !value.isStatic) {
+      if (
+        value.type !== NodeTypes.SIMPLE_EXPRESSION ||
+        // E.g: <p :foo="1 + 2" />.
+        // Do not add prop `foo` to `dynamicPropNames`.
+        (!value.isStatic && !value.isConstant)
+      ) {
         const name = key.content
         if (name === 'ref') {
           hasRef = true
@@ -190,7 +204,7 @@ export function buildProps(
         } else if (name === 'style') {
           hasStyleBinding = true
         } else if (name !== 'key') {
-          dynamicPropNames.push(key.content)
+          dynamicPropNames.push(name)
         }
       }
     } else {
@@ -228,7 +242,7 @@ export function buildProps(
       if (name === 'slot') {
         if (!isComponent) {
           context.onError(
-            createCompilerError(ErrorCodes.X_MISPLACED_V_SLOT, loc)
+            createCompilerError(ErrorCodes.X_V_SLOT_MISPLACED, loc)
           )
         }
         continue
@@ -274,15 +288,13 @@ export function buildProps(
       if (directiveTransform) {
         // has built-in directive transform.
         const { props, needRuntime } = directiveTransform(prop, node, context)
-        if (isArray(props)) {
-          properties.push(...props)
-          properties.forEach(analyzePatchFlag)
-        } else {
-          properties.push(props)
-          analyzePatchFlag(props)
-        }
+        props.forEach(analyzePatchFlag)
+        properties.push(...props)
         if (needRuntime) {
           runtimeDirectives.push(prop)
+          if (isSymbol(needRuntime)) {
+            directiveImportMap.set(prop, needRuntime)
+          }
         }
       } else {
         // no built-in transform, this is a user custom directive.
@@ -362,7 +374,12 @@ function dedupeProperties(properties: Property[]): Property[] {
     const name = prop.key.content
     const existing = knownProps[name]
     if (existing) {
-      if (name.startsWith('on') || name === 'style' || name === 'class') {
+      if (
+        name === 'style' ||
+        name === 'class' ||
+        name.startsWith('on') ||
+        name.startsWith('vnode')
+      ) {
         mergeAsArray(existing, prop)
       }
       // unexpected duplicate, should have emitted error during parse
@@ -385,20 +402,36 @@ function mergeAsArray(existing: Property, incoming: Property) {
   }
 }
 
-function createDirectiveArgs(
+function buildDirectiveArgs(
   dir: DirectiveNode,
   context: TransformContext
 ): ArrayExpression {
-  // inject statement for resolving directive
-  context.helper(RESOLVE_DIRECTIVE)
-  context.directives.add(dir.name)
-  const dirArgs: ArrayExpression['elements'] = [
-    toValidAssetId(dir.name, `directive`)
-  ]
+  const dirArgs: ArrayExpression['elements'] = []
+  const runtime = directiveImportMap.get(dir)
+  if (runtime) {
+    context.helper(runtime)
+    dirArgs.push(context.helperString(runtime))
+  } else {
+    // inject statement for resolving directive
+    context.helper(RESOLVE_DIRECTIVE)
+    context.directives.add(dir.name)
+    dirArgs.push(toValidAssetId(dir.name, `directive`))
+  }
   const { loc } = dir
   if (dir.exp) dirArgs.push(dir.exp)
-  if (dir.arg) dirArgs.push(dir.arg)
+  if (dir.arg) {
+    if (!dir.exp) {
+      dirArgs.push(`void 0`)
+    }
+    dirArgs.push(dir.arg)
+  }
   if (Object.keys(dir.modifiers).length) {
+    if (!dir.arg) {
+      if (!dir.exp) {
+        dirArgs.push(`void 0`)
+      }
+      dirArgs.push(`void 0`)
+    }
     dirArgs.push(
       createObjectExpression(
         dir.modifiers.map(modifier =>
